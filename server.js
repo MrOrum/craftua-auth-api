@@ -4,23 +4,28 @@ import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 
 const app = express();
-app.use(express.json());
 app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 const USERS_FILE = "./users.json";
 
-// Завантаження користувачів
+if (!fs.existsSync(USERS_FILE)) {
+    fs.writeFileSync(USERS_FILE, "[]");
+}
+
 function loadUsers() {
-    if (!fs.existsSync(USERS_FILE)) return [];
     return JSON.parse(fs.readFileSync(USERS_FILE));
 }
 
-// Збереження користувачів
 function saveUsers(users) {
     fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
-// ---------------- REGISTER ----------------
+app.get("/", (req, res) => {
+    res.send("Auth API is running");
+});
+
 app.post("/auth/register", (req, res) => {
     const { username, password, email } = req.body;
 
@@ -51,7 +56,6 @@ app.post("/auth/register", (req, res) => {
     });
 });
 
-// ---------------- LOGIN ----------------
 app.post("/auth/login", (req, res) => {
     const { username, password } = req.body;
 
@@ -73,7 +77,6 @@ app.post("/auth/login", (req, res) => {
     });
 });
 
-// ---------------- START SERVER ----------------
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log("Auth API running on port " + PORT);
