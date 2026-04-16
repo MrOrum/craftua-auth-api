@@ -1,141 +1,319 @@
-import express from "express";
-import cors from "cors";
-import { v4 as uuidv4 } from "uuid";
-import bcrypt from "bcrypt";
-import pkg from "pg";
+// server.js
+// CraftUA Auth API
 
-const { Pool } = pkg;
+const express = require("express");
+const cors = require("cors");
+const { Pool } = require("pg");
+const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true }));
+const PORT = process.env.PORT || 10000;
 
-// ---------------- PostgreSQL ----------------
-
-const pool = new Pool({
-    connectionString: "postgresql://craftua_auth_db_user:zRlPgq01j4SeTZIflB8BWQ2qPCmVECl3@dpg-d7ggpo0sfn5c738o7f6g-a.frankfurt-postgres.render.com/craftua_auth_db",
-    ssl: { rejectUnauthorized: false }
+// ---------- DB POOL ----------
+const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
-// Створення таблиці, якщо її немає
-async function initDB() {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT NOT NULL,
-            password TEXT NOT NULL,
-            token TEXT NOT NULL
-        );
-    `);
+// ---------- MIDDLEWARE ----------
+app.use(cors());
+app.use(express.json());
+
+// ---------- HELPERS ----------
+async function isUserBanned(userId) {
+  const res = await db.query(
+    `
+    SELECT 1
+    FROM bans
+    WHERE user_id = $1
+      AND (expires_at IS NULL OR expires_at > NOW())
+    LIMIT 1
+  `,
+    [userId]
+  );
+  return res.rowCount > 0;
 }
 
-initDB();
+async function getUserRoles(userId) {
+  const res = await db.query(
+    `
+    SELECT role
+    FROM roles
+    WHERE user_id = $1
+  `,
+    [userId]
+  );
+  return res.rows.map(r => r.role);
+}
 
-// ---------------- ROUTES ----------------
+function generateToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
+// ---------- ROUTES ----------
+
+// Health / DB test
+app.get("/db-test", async (req, res) => {
+  try {
+    const result = await db.query("SELECT NOW()");
+    res.json({ ok: true, time: result.rows[0].now });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Register
+app.post("/register", async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ ok: false, error: "Missing fields" });
+    }
+
+    const existing = await db.query(
+      "SELECT id FROM users WHERE username = $1 OR email = $2",
+      [username, email]
+    );
+    if (existing.rowCount > 0) {
+      return res
+        .status(409)
+        .json({ ok: false, error: "User with this username or email exists" });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const userRes = await db.query(
+      `
+      INSERT INTO users (username, email, password_hash)
+      VALUES ($1, $2, $3)
+      RETURNING id, username, email, role, created_at
+    `,
+      [username, email, passwordHash]
+    );
+
+    const user = userRes.rows[0];
+
+    res.json({ ok: true, user });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Login (site / launcher)
+app.post("/login", async (req, res) => {
+  try {
+    const { login, password } = req.body; // login = username or email
+
+    if (!login || !password) {
+      return res.status(400).json({ ok: false, error: "Missing fields" });
+    }
+
+    const userRes = await db.query(
+      `
+      SELECT *
+      FROM users
+      WHERE username = $1 OR email = $1
+    `,
+      [login]
+    );
+
+    if (userRes.rowCount === 0) {
+      return res.status(401).json({ ok: false, error: "Invalid credentials" });
+    }
+
+    const user = userRes.rows[0];
+
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      await db.query(
+        `
+        INSERT INTO auth_logs (user_id, ip, user_agent, success)
+        VALUES ($1, $2, $3, false)
+      `,
+        [user.id, req.ip, req.headers["user-agent"] || ""]
+      );
+      return res.status(401).json({ ok: false, error: "Invalid credentials" });
+    }
+
+    if (await isUserBanned(user.id)) {
+      return res.status(403).json({ ok: false, error: "User is banned" });
+    }
+
+    const token = generateToken();
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 днів
+
+    await db.query(
+      `
+      INSERT INTO tokens (user_id, token, expires_at)
+      VALUES ($1, $2, $3)
+    `,
+      [user.id, token, expiresAt]
+    );
+
+    await db.query(
+      `
+      UPDATE users
+      SET last_login = NOW()
+      WHERE id = $1
+    `,
+      [user.id]
+    );
+
+    await db.query(
+      `
+      INSERT INTO auth_logs (user_id, ip, user_agent, success)
+      VALUES ($1, $2, $3, true)
+    `,
+      [user.id, req.ip, req.headers["user-agent"] || ""]
+    );
+
+    const roles = await getUserRoles(user.id);
+
+    res.json({
+      ok: true,
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        roles
+      },
+      expires_at: expiresAt
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Alias for launcher auth (можеш використовувати /auth у лаунчері)
+app.post("/auth", async (req, res) => {
+  // просто прокидуємо на /login
+  req.url = "/login";
+  app._router.handle(req, res);
+});
+
+// Validate token
+app.get("/validate-token", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
+
+    if (!token) {
+      return res.status(401).json({ ok: false, error: "No token" });
+    }
+
+    const tokenRes = await db.query(
+      `
+      SELECT t.*, u.username, u.email, u.role AS main_role, u.id AS user_id
+      FROM tokens t
+      JOIN users u ON u.id = t.user_id
+      WHERE t.token = $1
+    `,
+      [token]
+    );
+
+    if (tokenRes.rowCount === 0) {
+      return res.status(401).json({ ok: false, error: "Invalid token" });
+    }
+
+    const row = tokenRes.rows[0];
+
+    if (row.expires_at && new Date(row.expires_at) < new Date()) {
+      return res.status(401).json({ ok: false, error: "Token expired" });
+    }
+
+    if (await isUserBanned(row.user_id)) {
+      return res.status(403).json({ ok: false, error: "User is banned" });
+    }
+
+    const roles = await getUserRoles(row.user_id);
+
+    res.json({
+      ok: true,
+      user: {
+        id: row.user_id,
+        username: row.username,
+        email: row.email,
+        role: row.main_role,
+        roles
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Logout (invalidate token)
+app.post("/logout", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
+
+    if (!token) {
+      return res.status(400).json({ ok: false, error: "No token" });
+    }
+
+    await db.query("DELETE FROM tokens WHERE token = $1", [token]);
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Latest launcher update
+app.get("/launcher/latest", async (req, res) => {
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM launcher_updates
+      ORDER BY created_at DESC
+      LIMIT 1
+    `
+    );
+    if (result.rowCount === 0) {
+      return res.json({ ok: true, update: null });
+    }
+    res.json({ ok: true, update: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Latest game update
+app.get("/game/latest", async (req, res) => {
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM game_updates
+      ORDER BY created_at DESC
+      LIMIT 1
+    `
+    );
+    if (result.rowCount === 0) {
+      return res.json({ ok: true, update: null });
+    }
+    res.json({ ok: true, update: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Root
 app.get("/", (req, res) => {
-    res.send("Auth API is running with PostgreSQL");
+  res.json({ ok: true, service: "CraftUA Auth API" });
 });
 
-// ---------------- REGISTER ----------------
-
-app.post("/auth/register", async (req, res) => {
-    const { username, password, email } = req.body;
-
-    if (!username || !password || !email) {
-        return res.json({ success: false, message: "Заповніть всі поля" });
-    }
-
-    try {
-        const existing = await pool.query(
-            "SELECT * FROM users WHERE username = $1",
-            [username]
-        );
-
-        if (existing.rows.length > 0) {
-            return res.json({ success: false, message: "Користувач вже існує" });
-        }
-
-        const hashed = await bcrypt.hash(password, 10);
-        const token = uuidv4();
-
-        await pool.query(
-            "INSERT INTO users (username, email, password, token) VALUES ($1, $2, $3, $4)",
-            [username, email, hashed, token]
-        );
-
-        return res.json({
-            success: true,
-            message: "Акаунт створено",
-            token
-        });
-
-    } catch (err) {
-        console.error(err);
-        return res.json({ success: false, message: "Помилка сервера" });
-    }
-});
-
-// ---------------- LOGIN ----------------
-
-app.post("/auth/login", async (req, res) => {
-    const { username, password } = req.body;
-
-    try {
-        const result = await pool.query(
-            "SELECT * FROM users WHERE username = $1",
-            [username]
-        );
-
-        if (result.rows.length === 0) {
-            return res.json({ success: false, message: "Користувача не знайдено" });
-        }
-
-        const user = result.rows[0];
-
-        const match = await bcrypt.compare(password, user.password);
-        if (!match) {
-            return res.json({ success: false, message: "Невірний пароль" });
-        }
-
-        return res.json({
-            success: true,
-            message: "Вхід успішний",
-            token: user.token
-        });
-
-    } catch (err) {
-        console.error(err);
-        return res.json({ success: false, message: "Помилка сервера" });
-    }
-});
-
-// ---------------- VERIFY TOKEN ----------------
-
-app.post("/auth/verify", async (req, res) => {
-    const { token } = req.body;
-
-    if (!token) return res.json({ valid: false });
-
-    try {
-        const result = await pool.query(
-            "SELECT * FROM users WHERE token = $1",
-            [token]
-        );
-
-        return res.json({ valid: result.rows.length > 0 });
-
-    } catch (err) {
-        console.error(err);
-        return res.json({ valid: false });
-    }
-});
-
-// ---------------- START SERVER ----------------
-
-const PORT = process.env.PORT || 10000;
+// ---------- START ----------
 app.listen(PORT, () => {
-    console.log("Auth API running on port " + PORT);
+  console.log(`Server listening on port ${PORT}`);
 });
