@@ -1,16 +1,17 @@
 {
   "name": "craftua-auth-api",
   "version": "1.0.0",
+  "description": "CraftUA Authentication API",
   "main": "server.js",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "uuid": "^9.0.0",
-    "pg": "^8.11.3",
-    "bcrypt": "^5.1.1"
+    "crypto": "^1.0.1",
+    "express": "^4.18.2",
+    "pg": "^8.11.3"
   }
 }
