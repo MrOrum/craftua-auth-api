@@ -50,26 +50,17 @@ async function getUserRoles(userId) {
 }
 
 // ----------------------
-// ROUTES
+// AUTH ROUTER (/auth/...)
 // ----------------------
-
-// DB TEST
-app.get("/db-test", async (req, res) => {
-    try {
-        const result = await db.query("SELECT NOW()");
-        res.json({ ok: true, time: result.rows[0].now });
-    } catch (err) {
-        res.json({ ok: false, error: err.message });
-    }
-});
+const auth = express.Router();
 
 // REGISTER
-app.post("/register", async (req, res) => {
+auth.post("/register", async (req, res) => {
     try {
         const { username, email, password } = req.body;
 
         if (!username || !email || !password)
-            return res.status(400).json({ ok: false, error: "Missing fields" });
+            return res.status(400).json({ success: false, message: "Заповніть всі поля" });
 
         const exists = await db.query(
             `SELECT id FROM users WHERE username = $1 OR email = $2`,
@@ -77,7 +68,7 @@ app.post("/register", async (req, res) => {
         );
 
         if (exists.rowCount > 0)
-            return res.status(409).json({ ok: false, error: "User exists" });
+            return res.status(409).json({ success: false, message: "Користувач вже існує" });
 
         const hash = await bcrypt.hash(password, 10);
 
@@ -88,33 +79,33 @@ app.post("/register", async (req, res) => {
             [username, email, hash]
         );
 
-        res.json({ ok: true, user: user.rows[0] });
+        res.json({ success: true, user: user.rows[0] });
     } catch (err) {
-        res.status(500).json({ ok: false, error: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
 // LOGIN
-app.post("/login", async (req, res) => {
+auth.post("/login", async (req, res) => {
     try {
-        const { login, password } = req.body;
+        const { username, password } = req.body;
 
         const userRes = await db.query(
             `SELECT * FROM users WHERE username = $1 OR email = $1`,
-            [login]
+            [username]
         );
 
         if (userRes.rowCount === 0)
-            return res.status(401).json({ ok: false, error: "Invalid credentials" });
+            return res.status(401).json({ success: false, message: "Невірний логін або пароль" });
 
         const user = userRes.rows[0];
 
         const match = await bcrypt.compare(password, user.password_hash);
         if (!match)
-            return res.status(401).json({ ok: false, error: "Invalid credentials" });
+            return res.status(401).json({ success: false, message: "Невірний логін або пароль" });
 
         if (await isUserBanned(user.id))
-            return res.status(403).json({ ok: false, error: "User banned" });
+            return res.status(403).json({ success: false, message: "Користувач заблокований" });
 
         const token = generateToken();
         const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -125,15 +116,10 @@ app.post("/login", async (req, res) => {
             [user.id, token, expires]
         );
 
-        await db.query(
-            `UPDATE users SET last_login = NOW() WHERE id = $1`,
-            [user.id]
-        );
-
         const roles = await getUserRoles(user.id);
 
         res.json({
-            ok: true,
+            success: true,
             token,
             expires_at: expires,
             user: {
@@ -145,24 +131,17 @@ app.post("/login", async (req, res) => {
             }
         });
     } catch (err) {
-        res.status(500).json({ ok: false, error: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// AUTH (alias for launcher)
-app.post("/auth", (req, res) => {
-    req.url = "/login";
-    app._router.handle(req, res);
-});
-
-// VALIDATE TOKEN
-app.get("/validate-token", async (req, res) => {
+// VERIFY TOKEN
+auth.post("/verify", async (req, res) => {
     try {
-        const auth = req.headers.authorization || "";
-        const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+        const { token } = req.body;
 
         if (!token)
-            return res.status(401).json({ ok: false, error: "No token" });
+            return res.status(400).json({ success: false, message: "Немає токена" });
 
         const result = await db.query(
             `SELECT t.*, u.username, u.email, u.role AS main_role, u.id AS user_id
@@ -173,20 +152,20 @@ app.get("/validate-token", async (req, res) => {
         );
 
         if (result.rowCount === 0)
-            return res.status(401).json({ ok: false, error: "Invalid token" });
+            return res.status(401).json({ success: false, message: "Невірний токен" });
 
         const row = result.rows[0];
 
         if (new Date(row.expires_at) < new Date())
-            return res.status(401).json({ ok: false, error: "Token expired" });
+            return res.status(401).json({ success: false, message: "Токен прострочений" });
 
         if (await isUserBanned(row.user_id))
-            return res.status(403).json({ ok: false, error: "User banned" });
+            return res.status(403).json({ success: false, message: "Користувач заблокований" });
 
         const roles = await getUserRoles(row.user_id);
 
         res.json({
-            ok: true,
+            success: true,
             user: {
                 id: row.user_id,
                 username: row.username,
@@ -196,50 +175,28 @@ app.get("/validate-token", async (req, res) => {
             }
         });
     } catch (err) {
-        res.status(500).json({ ok: false, error: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
 // LOGOUT
-app.post("/logout", async (req, res) => {
+auth.post("/logout", async (req, res) => {
     try {
-        const auth = req.headers.authorization || "";
-        const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+        const { token } = req.body;
 
         if (!token)
-            return res.status(400).json({ ok: false, error: "No token" });
+            return res.status(400).json({ success: false, message: "Немає токена" });
 
         await db.query(`DELETE FROM tokens WHERE token = $1`, [token]);
 
-        res.json({ ok: true });
+        res.json({ success: true });
     } catch (err) {
-        res.status(500).json({ ok: false, error: err.message });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// LAUNCHER UPDATE
-app.get("/launcher/latest", async (req, res) => {
-    try {
-        const result = await db.query(
-            `SELECT * FROM launcher_updates ORDER BY created_at DESC LIMIT 1`
-        );
-        res.json({ ok: true, update: result.rows[0] || null });
-    } catch (err) {
-        res.status(500).json({ ok: false, error: err.message });
-    }
-});
-
-// GAME UPDATE
-app.get("/game/latest", async (req, res) => {
-    try {
-        const result = await db.query(
-            `SELECT * FROM game_updates ORDER BY created_at DESC LIMIT 1`
-        );
-        res.json({ ok: true, update: result.rows[0] || null });
-    } catch (err) {
-        res.status(500).json({ ok: false, error: err.message });
-    }
-});
+// Підключаємо /auth/*
+app.use("/auth", auth);
 
 // ROOT
 app.get("/", (req, res) => {
