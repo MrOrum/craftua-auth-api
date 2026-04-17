@@ -1,4 +1,4 @@
-// server.js — CraftUA Auth API
+// CraftUA Auth API — simplified version for your DB structure
 
 const express = require("express");
 const cors = require("cors");
@@ -10,7 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // ----------------------
-// DATABASE CONNECTION
+// DATABASE
 // ----------------------
 const db = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -30,27 +30,8 @@ function generateToken() {
     return crypto.randomBytes(32).toString("hex");
 }
 
-async function isUserBanned(userId) {
-    const res = await db.query(
-        `SELECT 1 FROM bans 
-         WHERE user_id = $1 
-         AND (expires_at IS NULL OR expires_at > NOW())
-         LIMIT 1`,
-        [userId]
-    );
-    return res.rowCount > 0;
-}
-
-async function getUserRoles(userId) {
-    const res = await db.query(
-        `SELECT role FROM roles WHERE user_id = $1`,
-        [userId]
-    );
-    return res.rows.map(r => r.role);
-}
-
 // ----------------------
-// AUTH ROUTER (/auth/...)
+// AUTH ROUTER
 // ----------------------
 const auth = express.Router();
 
@@ -72,20 +53,20 @@ auth.post("/register", async (req, res) => {
 
         const hash = await bcrypt.hash(password, 10);
 
-        const user = await db.query(
-            `INSERT INTO users (username, email, password_hash)
-             VALUES ($1, $2, $3)
-             RETURNING id, username, email, created_at`,
+        await db.query(
+            `INSERT INTO users (username, email, password)
+             VALUES ($1, $2, $3)`,
             [username, email, hash]
         );
 
-        res.json({ success: true, user: user.rows[0] });
+        res.json({ success: true, message: "Реєстрація успішна" });
+
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// LOGIN (ВИПРАВЛЕНИЙ)
+// LOGIN
 auth.post("/login", async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -100,78 +81,52 @@ auth.post("/login", async (req, res) => {
 
         const user = userRes.rows[0];
 
-        const match = await bcrypt.compare(password, user.password_hash);
+        const match = await bcrypt.compare(password, user.password);
         if (!match)
             return res.status(401).json({ success: false, message: "Невірний логін або пароль" });
 
-        if (await isUserBanned(user.id))
-            return res.status(403).json({ success: false, message: "Користувач заблокований" });
-
         const token = generateToken();
-        const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
         await db.query(
-            `INSERT INTO tokens (user_id, token, expires_at)
-             VALUES ($1, $2, $3)`,
-            [user.id, token, expires]
+            `UPDATE users SET token = $1 WHERE id = $2`,
+            [token, user.id]
         );
-
-        const roles = await getUserRoles(user.id);
 
         res.json({
             success: true,
             token,
-            expires_at: expires,
             user: {
                 id: user.id,
                 username: user.username,
-                email: user.email,
-                roles
+                email: user.email
             }
         });
+
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// VERIFY TOKEN (ВИПРАВЛЕНИЙ)
+// VERIFY
 auth.post("/verify", async (req, res) => {
     try {
         const { token } = req.body;
 
         if (!token)
-            return res.status(400).json({ success: false, valid: false, message: "Немає токена" });
+            return res.status(400).json({ success: false, valid: false });
 
         const result = await db.query(
-            `SELECT t.*, u.username, u.email, u.id AS user_id
-             FROM tokens t
-             JOIN users u ON u.id = t.user_id
-             WHERE t.token = $1`,
+            `SELECT id, username, email FROM users WHERE token = $1`,
             [token]
         );
 
         if (result.rowCount === 0)
-            return res.status(401).json({ success: false, valid: false, message: "Невірний токен" });
-
-        const row = result.rows[0];
-
-        if (new Date(row.expires_at) < new Date())
-            return res.status(401).json({ success: false, valid: false, message: "Токен прострочений" });
-
-        if (await isUserBanned(row.user_id))
-            return res.status(403).json({ success: false, valid: false, message: "Користувач заблокований" });
-
-        const roles = await getUserRoles(row.user_id);
+            return res.status(401).json({ success: false, valid: false });
 
         res.json({
             success: true,
             valid: true,
-            user: {
-                id: row.user_id,
-                username: row.username,
-                email: row.email,
-                roles
-            }
+            user: result.rows[0]
         });
 
     } catch (err) {
@@ -184,26 +139,27 @@ auth.post("/logout", async (req, res) => {
     try {
         const { token } = req.body;
 
-        if (!token)
-            return res.status(400).json({ success: false, message: "Немає токена" });
-
-        await db.query(`DELETE FROM tokens WHERE token = $1`, [token]);
+        await db.query(
+            `UPDATE users SET token = NULL WHERE token = $1`,
+            [token]
+        );
 
         res.json({ success: true });
+
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// Підключаємо /auth/*
+// ROUTER
 app.use("/auth", auth);
 
 // ROOT
 app.get("/", (req, res) => {
-    res.json({ ok: true, service: "CraftUA Auth API" });
+    res.json({ ok: true, service: "CraftUA Auth API (simple)" });
 });
 
-// START SERVER
+// START
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
