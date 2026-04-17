@@ -75,7 +75,7 @@ auth.post("/register", async (req, res) => {
         const user = await db.query(
             `INSERT INTO users (username, email, password_hash)
              VALUES ($1, $2, $3)
-             RETURNING id, username, email, role, created_at`,
+             RETURNING id, username, email, created_at`,
             [username, email, hash]
         );
 
@@ -85,7 +85,7 @@ auth.post("/register", async (req, res) => {
     }
 });
 
-// LOGIN
+// LOGIN (ВИПРАВЛЕНИЙ)
 auth.post("/login", async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -126,7 +126,6 @@ auth.post("/login", async (req, res) => {
                 id: user.id,
                 username: user.username,
                 email: user.email,
-                role: user.role,
                 roles
             }
         });
@@ -144,7 +143,7 @@ auth.post("/verify", async (req, res) => {
             return res.status(400).json({ success: false, valid: false, message: "Немає токена" });
 
         const result = await db.query(
-            `SELECT t.*, u.username, u.email, u.role AS main_role, u.id AS user_id
+            `SELECT t.*, u.username, u.email, u.id AS user_id
              FROM tokens t
              JOIN users u ON u.id = t.user_id
              WHERE t.token = $1`,
@@ -171,7 +170,6 @@ auth.post("/verify", async (req, res) => {
                 id: row.user_id,
                 username: row.username,
                 email: row.email,
-                role: row.main_role,
                 roles
             }
         });
