@@ -135,13 +135,13 @@ auth.post("/login", async (req, res) => {
     }
 });
 
-// VERIFY TOKEN
+// VERIFY TOKEN (ВИПРАВЛЕНИЙ)
 auth.post("/verify", async (req, res) => {
     try {
         const { token } = req.body;
 
         if (!token)
-            return res.status(400).json({ success: false, message: "Немає токена" });
+            return res.status(400).json({ success: false, valid: false, message: "Немає токена" });
 
         const result = await db.query(
             `SELECT t.*, u.username, u.email, u.role AS main_role, u.id AS user_id
@@ -152,20 +152,21 @@ auth.post("/verify", async (req, res) => {
         );
 
         if (result.rowCount === 0)
-            return res.status(401).json({ success: false, message: "Невірний токен" });
+            return res.status(401).json({ success: false, valid: false, message: "Невірний токен" });
 
         const row = result.rows[0];
 
         if (new Date(row.expires_at) < new Date())
-            return res.status(401).json({ success: false, message: "Токен прострочений" });
+            return res.status(401).json({ success: false, valid: false, message: "Токен прострочений" });
 
         if (await isUserBanned(row.user_id))
-            return res.status(403).json({ success: false, message: "Користувач заблокований" });
+            return res.status(403).json({ success: false, valid: false, message: "Користувач заблокований" });
 
         const roles = await getUserRoles(row.user_id);
 
         res.json({
             success: true,
+            valid: true,
             user: {
                 id: row.user_id,
                 username: row.username,
@@ -174,8 +175,9 @@ auth.post("/verify", async (req, res) => {
                 roles
             }
         });
+
     } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
+        res.status(500).json({ success: false, valid: false, message: err.message });
     }
 });
 
