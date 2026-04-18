@@ -1,4 +1,4 @@
-// CraftUA Auth API — simplified version for your DB structure
+// CraftUA Auth API — FULL FIXED VERSION for your DB structure
 
 const express = require("express");
 const cors = require("cors");
@@ -54,7 +54,7 @@ auth.post("/register", async (req, res) => {
         const hash = await bcrypt.hash(password, 10);
 
         await db.query(
-            `INSERT INTO users (username, email, password)
+            `INSERT INTO users (username, email, password_hash)
              VALUES ($1, $2, $3)`,
             [username, email, hash]
         );
@@ -81,15 +81,16 @@ auth.post("/login", async (req, res) => {
 
         const user = userRes.rows[0];
 
-        const match = await bcrypt.compare(password, user.password);
+        const match = await bcrypt.compare(password, user.password_hash);
         if (!match)
             return res.status(401).json({ success: false, message: "Невірний логін або пароль" });
 
         const token = generateToken();
 
         await db.query(
-            `UPDATE users SET token = $1 WHERE id = $2`,
-            [token, user.id]
+            `INSERT INTO tokens (user_id, token, expires_at)
+             VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
+            [user.id, token]
         );
 
         res.json({
@@ -116,7 +117,11 @@ auth.post("/verify", async (req, res) => {
             return res.status(400).json({ success: false, valid: false });
 
         const result = await db.query(
-            `SELECT id, username, email FROM users WHERE token = $1`,
+            `SELECT users.id, users.username, users.email
+             FROM tokens
+             JOIN users ON users.id = tokens.user_id
+             WHERE tokens.token = $1
+             AND tokens.expires_at > NOW()`,
             [token]
         );
 
@@ -140,7 +145,7 @@ auth.post("/logout", async (req, res) => {
         const { token } = req.body;
 
         await db.query(
-            `UPDATE users SET token = NULL WHERE token = $1`,
+            `DELETE FROM tokens WHERE token = $1`,
             [token]
         );
 
@@ -156,7 +161,7 @@ app.use("/auth", auth);
 
 // ROOT
 app.get("/", (req, res) => {
-    res.json({ ok: true, service: "CraftUA Auth API (simple)" });
+    res.json({ ok: true, service: "CraftUA Auth API (fixed)" });
 });
 
 // START
