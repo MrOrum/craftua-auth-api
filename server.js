@@ -1,4 +1,4 @@
-// CraftUA Auth API — FULL FIXED VERSION for your DB structure
+// CraftUA Auth API — GML Compatible Final Version
 
 const express = require("express");
 const cors = require("cors");
@@ -66,24 +66,28 @@ auth.post("/register", async (req, res) => {
     }
 });
 
-// LOGIN
+// LOGIN — GML COMPATIBLE
 auth.post("/login", async (req, res) => {
     try {
-        const { username, password } = req.body;
+        const login = req.body.username || req.body.Login;
+        const password = req.body.password || req.body.Password;
+
+        if (!login || !password)
+            return res.json({ success: false, message: "Заповніть логін і пароль" });
 
         const userRes = await db.query(
             `SELECT * FROM users WHERE username = $1 OR email = $1`,
-            [username]
+            [login]
         );
 
         if (userRes.rowCount === 0)
-            return res.status(401).json({ success: false, message: "Невірний логін або пароль" });
+            return res.json({ success: false, message: "Невірний логін або пароль" });
 
         const user = userRes.rows[0];
 
         const match = await bcrypt.compare(password, user.password_hash);
         if (!match)
-            return res.status(401).json({ success: false, message: "Невірний логін або пароль" });
+            return res.json({ success: false, message: "Невірний логін або пароль" });
 
         const token = generateToken();
 
@@ -93,18 +97,16 @@ auth.post("/login", async (req, res) => {
             [user.id, token]
         );
 
-        res.json({
+        // ВАЖЛИВО: формат під GML Launcher
+        return res.json({
             success: true,
-            token,
-            user: {
-                id: user.id,
-                username: user.username,
-                email: user.email
-            }
+            uuid: user.uuid,
+            username: user.username,
+            token: token
         });
 
     } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
+        return res.json({ success: false, message: "Помилка сервера: " + err.message });
     }
 });
 
@@ -114,10 +116,10 @@ auth.post("/verify", async (req, res) => {
         const { token } = req.body;
 
         if (!token)
-            return res.status(400).json({ success: false, valid: false });
+            return res.json({ success: false, valid: false });
 
         const result = await db.query(
-            `SELECT users.id, users.username, users.email
+            `SELECT users.id, users.username, users.email, users.uuid
              FROM tokens
              JOIN users ON users.id = tokens.user_id
              WHERE tokens.token = $1
@@ -126,7 +128,7 @@ auth.post("/verify", async (req, res) => {
         );
 
         if (result.rowCount === 0)
-            return res.status(401).json({ success: false, valid: false });
+            return res.json({ success: false, valid: false });
 
         res.json({
             success: true,
@@ -135,7 +137,7 @@ auth.post("/verify", async (req, res) => {
         });
 
     } catch (err) {
-        res.status(500).json({ success: false, valid: false, message: err.message });
+        res.json({ success: false, valid: false, message: err.message });
     }
 });
 
@@ -152,7 +154,7 @@ auth.post("/logout", async (req, res) => {
         res.json({ success: true });
 
     } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
+        res.json({ success: false, message: err.message });
     }
 });
 
@@ -161,7 +163,7 @@ app.use("/auth", auth);
 
 // ROOT
 app.get("/", (req, res) => {
-    res.json({ ok: true, service: "CraftUA Auth API (fixed)" });
+    res.json({ ok: true, service: "CraftUA Auth API (GML Compatible)" });
 });
 
 // START
